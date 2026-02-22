@@ -9,122 +9,137 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Delay helper
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36'
 ];
 
+// GLOBAL COOKIE JAR
+let SESSION_COOKIE = "";
+
+async function initSession() {
+    try {
+        const res = await axios.get("https://vahanx.in/", {
+            headers: { "User-Agent": USER_AGENTS[0] },
+            timeout: 10000
+        });
+
+        if (res.headers["set-cookie"]) {
+            SESSION_COOKIE = res.headers["set-cookie"].join("; ");
+        }
+    } catch {}
+}
+
+async function fetchPage(url) {
+    const headers = {
+        "User-Agent": USER_AGENTS[Math.floor(Math.random()*USER_AGENTS.length)],
+        "Accept": "text/html,application/xhtml+xml",
+        "Referer": "https://vahanx.in/",
+        "Cookie": SESSION_COOKIE,
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Connection": "keep-alive"
+    };
+
+    return axios.get(url, { headers, timeout: 15000 });
+}
+
 async function getVehicleDetails(vNo, attempt = 1) {
-    const registrationNumber = vNo.toUpperCase().trim();
-    const url = `https://vahanx.in/rc-search/${registrationNumber}`;
+    const reg = vNo.toUpperCase().trim();
+    const url = `https://vahanx.in/rc-search/${reg}`;
 
     try {
-        // Step 1: Mimic a real session by getting cookies from the home page first
-        const initResponse = await axios.get('https://vahanx.in/', {
-            headers: { 'User-Agent': USER_AGENTS[0] },
-            timeout: 8000
-        });
-        const cookies = initResponse.headers['set-cookie'];
+        if (!SESSION_COOKIE) await initSession();
 
-        // Step 2: Exponential backoff delay for retries
         if (attempt > 1) {
-            console.log(`Retry attempt ${attempt} for ${registrationNumber}...`);
-            await sleep(2000 * attempt); 
+            await sleep(2000 + Math.random()*2000);
         }
 
-        // Step 3: Fetch the actual data
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Referer': 'https://vahanx.in/',
-                'Cookie': cookies ? cookies.join('; ') : '',
-                'Cache-Control': 'no-cache'
-            },
-            timeout: 15000
-        });
+        const res = await fetchPage(url);
+        const html = res.data;
 
-        const $ = cheerio.load(response.data);
-        
-        // Anti-Block Check: If page is too small or missing span tags
-        if ($('span').length < 5) {
-            if (attempt < 3) return await getVehicleDetails(vNo, attempt + 1);
-            throw new Error("RATE_LIMITED_BY_TARGET");
+        // Detect block page
+        if (!html || html.length < 5000 || html.includes("Just a moment")) {
+            if (attempt <= 3) {
+                await initSession();
+                return getVehicleDetails(vNo, attempt+1);
+            }
+            throw new Error("BLOCKED");
         }
+
+        const $ = cheerio.load(html);
 
         const extract = (label) => {
-            let val = "Not Found";
-            $('span').each((i, el) => {
-                if ($(el).text().trim().toLowerCase() === label.toLowerCase()) {
-                    val = $(el).parent().find('p').text().trim() || "Not Found";
+            let value = "Not Found";
+
+            $("span").each((i, el) => {
+                const txt = $(el).text().trim().toLowerCase();
+                if (txt === label.toLowerCase()) {
+                    value = $(el).parent().find("p").text().trim() || "Not Found";
                 }
             });
-            return val;
+
+            return value;
         };
 
-        const result = {
+        const data = {
             "Vehicle No": extract("Registration Number"),
             "Model Name": extract("Model Name"),
             "Maker Model": extract("Maker Model"),
             "Owner Name": extract("Owner Name"),
-            "Father's Name": extract("Father's Name"),
-            "Registered RTO": extract("Registered RTO"),
-            "Owner Serial No": extract("Owner Serial No"),
+            "Father Name": extract("Father's Name"),
+            "RTO": extract("Registered RTO"),
             "Vehicle Type": extract("Vehicle Class"),
             "Fuel Type": extract("Fuel Type"),
-            "Fuel Norms": extract("Fuel Norms"),
-            "Chassis No": extract("Chassis Number"),
-            "Engine No": extract("Engine Number"),
-            "Registration Date": extract("Registration Date"),
-            "Registration Upto": extract("Registration Upto"),
-            "Fitness Upto": extract("Fitness Upto"),
-            "PUC Upto": extract("PUC Upto"),
-            "PUC No": extract("PUC Number"),
+            "Chassis": extract("Chassis Number"),
+            "Engine": extract("Engine Number"),
+            "Reg Date": extract("Registration Date"),
+            "Reg Upto": extract("Registration Upto"),
+            "Insurance": extract("Insurance Company"),
             "Insurance Upto": extract("Insurance Upto"),
-            "Insurance No": extract("Insurance Number"),
-            "Insurance Company": extract("Insurance Company"),
-            "Insurance Expiry In": extract("Insurance Expiry In"),
             "Vehicle Age": extract("Vehicle Age"),
             "Finance": extract("Finance"),
-            "Financer Name": extract("Financier Name")
+            "Financer": extract("Financier Name")
         };
 
-        // If data is still blank, retry one last time
-        if (result["Vehicle No"] === "Not Found" && attempt < 3) {
-            return await getVehicleDetails(vNo, attempt + 1);
+        if (data["Vehicle No"] === "Not Found") {
+            if (attempt <= 3) {
+                return getVehicleDetails(vNo, attempt+1);
+            }
         }
 
-        return { success: true, data: result };
+        return { success: true, data };
 
-    } catch (error) {
-        if (attempt < 3 && (error.response?.status === 429 || error.code === 'ECONNABORTED')) {
-            return await getVehicleDetails(vNo, attempt + 1);
+    } catch (err) {
+        if (attempt <= 3) {
+            await initSession();
+            return getVehicleDetails(vNo, attempt+1);
         }
-        return { 
-            success: false, 
-            message: "The server is currently busy or blocking requests. Try again in a few minutes.",
-            error: error.message 
+
+        return {
+            success: false,
+            message: "Target site blocking or busy. Try later.",
+            error: err.message
         };
     }
 }
 
-// Routes
-app.get('/', (req, res) => res.status(200).send("Vehicle API Status: Active"));
+// ROUTES
+app.get("/", (req,res)=>res.send("Vehicle API Running"));
 
-app.get('/api/vehicle/:vno', async (req, res) => {
+app.get("/api/vehicle/:vno", async (req,res)=>{
     const result = await getVehicleDetails(req.params.vno);
     res.json(result);
 });
 
-app.listen(PORT, () => console.log(`API running on port ${PORT}`));
+app.listen(PORT, ()=>console.log("API running on", PORT));
 
-// Keep Render Alive
-setInterval(() => {
+// Keep Render alive
+setInterval(()=>{
     if (process.env.RENDER_EXTERNAL_HOSTNAME) {
-        axios.get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}/`).catch(() => {});
+        axios.get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}/`).catch(()=>{});
     }
-}, 600000);
+},600000);
